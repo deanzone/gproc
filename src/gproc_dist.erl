@@ -22,7 +22,8 @@
 %% <p>For a detailed description, see gproc/doc/erlang07-wiger.pdf.</p>
 %% @end
 -module(gproc_dist).
--behaviour(gen_leader).
+
+%% -behaviour(gen_leader).  % to avoid unnecessary warnings
 
 -export([start_link/0, start_link/1,
          reg/1, reg/4, unreg/1,
@@ -572,10 +573,10 @@ handle_leader_call({Unreg, {T,g,Name} = K, Pid}, _From, S, _E)
                             {reply, true, [{delete, [{K,Pid}, {Pid,K}]}], S}
                     end;
                T == r ->
-                    case ets:lookup(?TAB, {{rc,g,Name},rc}) of
-                        [RC] ->
+                    case lookup_resource_counters(Name) of
+                        [_|_] = RCs ->
                             {reply, true, [{delete,[{K,Pid}, {Pid,K}]},
-                                           {insert, [RC]}], S};
+                                           {insert, RCs}], S};
                         [] ->
                             {reply, true, [{delete, [{K,Pid}, {Pid, K}]}], S}
                     end;
@@ -617,12 +618,15 @@ handle_leader_call({give_away, {T,g,_} = K, To, Pid}, _From, S, _E)
             {reply, badarg, S}
     end;
 handle_leader_call({mreg, T, g, L, Pid}, _From, S, _E) ->
-    if T==p; T==n; T==r ->
+    if T==p; T==n; T==a; T==r ->
             try gproc_lib:insert_many(T, g, L, Pid) of
                 {true,Objs} -> {reply, true, [{insert,Objs}], S};
                 false       -> {reply, badarg, S}
             catch
-                error:_     -> {reply, badarg, S}
+                throw:?GPROC_THROW(_) ->
+                    {reply, badarg, S};
+                error:_ ->
+                    {reply, badarg, S}
             end;
        true -> {reply, badarg, S}
     end;
@@ -751,7 +755,7 @@ mk_broadcast_insert_vals(Objs) ->
 		      [{{K,Pid},Pid,Value} | ets:lookup(?TAB,{{a,g,Name},a})]
 			  ++ ets:lookup(?TAB, {Pid,K});
                  C == r ->
-                      [{{K,Pid},Pid,Value} | ets:lookup(?TAB,{{rc,g,Name},rc})]
+                      [{{K,Pid},Pid,Value} | lookup_resource_counters(Name)]
                           ++ ets:lookup(?TAB, {Pid, K});
 		 C == n ->
 		      [{{K,n},Pid,Value}| ets:lookup(?TAB, {Pid,K})];
@@ -985,9 +989,9 @@ surrendered_1(Globs) ->
                   [Obj|Acc]
           end, [], Globs),
     ?event({'Ldr_local_globs', Ldr_local_globs}),
-    case [{K,P,V} || {K,P,V} <- My_local_globs,
+    case [{K,P,V} || {{K,_}=R,P,V} <- My_local_globs,
 		     is_pid(P) andalso
-			 not(lists:keymember(K, 1, Ldr_local_globs))] of
+			 not(lists:keymember(R, 1, Ldr_local_globs))] of
         [] ->
             %% phew! We have the same picture
             ok;
@@ -1085,7 +1089,17 @@ decrement_resource_count({r,g,Rsrc}, Acc) ->
         true ->
             %% Call the lib function, which might trigger events
             gproc_lib:decrement_resource_count(g, Rsrc),
-            ets:lookup(?TAB, Key) ++ Acc
+            lookup_resource_counters(Rsrc) ++ Acc
+    end.
+
+lookup_resource_counters(K) ->
+    case is_tuple(K) of
+        true ->
+            ets:lookup(?TAB, {{rc,g,K}, rc})
+                ++ ets:lookup(
+                     ?TAB, {{rc,g,setelement(size(K),K,'\\_')}, rc});
+        false ->
+            ets:lookup(?TAB, {{rc,g,K}, rc})
     end.
 
 pid_to_give_away_to(P) when is_pid(P) ->
